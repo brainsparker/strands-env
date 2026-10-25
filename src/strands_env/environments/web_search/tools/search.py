@@ -18,12 +18,16 @@ MAX_RESULTS = 10
 
 GOOGLE_SERPER_DEV_URL = "https://google.serper.dev/search"
 GOOGLE_CUSTOM_SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
+YOUCOM_FREE_SEARCH_URL = "https://api.you.com/v1/agents/search"
+YOUCOM_SEARCH_URL = "https://ydc-index.io/v1/search"
+YOUCOM_USER_AGENT = "youdotcom-integration/strands-rl-strands-env"
+YOUCOM_MAX_RETRY_AFTER = 5.0  # seconds; a longer Retry-After fails the call instead of stalling a rollout
 
-type WebSearchAPIProvider = Literal["serper", "google"]
+type WebSearchAPIProvider = Literal["serper", "google", "youcom"]
 
 
 class WebSearchToolkit:
-    """Search tools behind a provider switch (`serper` / `google`).
+    """Search tools behind a provider switch (`serper` / `google` / `youcom`).
 
     Each provider is a separate `@tool` method, so an environment can expose one, the other, or
     the unified `search` that dispatches on `api_provider`. Credentials are checked lazily by
@@ -167,6 +171,88 @@ class WebSearchToolkit:
             return f"Search failed: {e}."
 
     # ------------------------------------------------------------------
+    # You.com
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _youcom_error(status: int, keyed: bool, retry_after: float | None) -> str:
+        if status in (401, 403):
+            reason = "YDC_API_KEY was rejected" if keyed else "the keyless tier refused the request"
+        elif status == 402:
+            reason = "out of credits" if keyed else "free daily quota used up; set YDC_API_KEY"
+        elif status == 429:
+            reason = "rate limited" + (f", retry after {retry_after:g}s" if retry_after is not None else "")
+        else:
+            reason = f"HTTP {status}"
+        return f"Search failed: You.com {reason}."
+
+    @staticmethod
+    def _retry_after(value: str | None) -> float | None:
+        try:
+            seconds = float(value) if value is not None else None
+        except ValueError:
+            return None
+        return seconds if seconds is not None and seconds >= 0 else None
+
+    @tool
+    async def youcom_search(self, query: str, top_k: int = 5) -> str:
+        """Search the web using the You.com Search API.
+
+        Works without a key (free tier, 100 searches/day per IP); set `YDC_API_KEY` for training volume.
+
+        Args:
+            query: The search query.
+            top_k: Number of results to return.
+
+        Returns:
+            Search results with title, URL, and snippet for each result.
+        """
+        return await self._youcom_search(query, top_k)
+
+    async def _youcom_search(self, query: str, top_k: int) -> str:
+        logger.info("[youcom_search] query=%s, top_k=%s", query, top_k)
+
+        top_k = max(1, min(top_k, MAX_RESULTS))
+        query = self.apply_blocked_domains(query, self.blocked_domains)
+        api_key = os.getenv("YDC_API_KEY", "").strip()
+        headers = {"User-Agent": YOUCOM_USER_AGENT, "Accept": "application/json"}
+        body = {"query": query, "count": top_k}
+
+        async def send() -> tuple[int, str | None, dict]:
+            if api_key:
+                request = self._get_session().post(
+                    YOUCOM_SEARCH_URL, json=body, headers={**headers, "X-API-Key": api_key}
+                )
+            else:
+                request = self._get_session().get(
+                    YOUCOM_FREE_SEARCH_URL, params={k: str(v) for k, v in body.items()}, headers=headers
+                )
+            async with request as response:
+                if response.status >= 400:
+                    return response.status, response.headers.get("Retry-After"), {}
+                return response.status, None, await response.json()
+
+        try:
+            async with self.semaphore:
+                status, retry_after_header, data = await send()
+                retry_after = self._retry_after(retry_after_header)
+                if status == 429 and retry_after is not None and retry_after <= YOUCOM_MAX_RETRY_AFTER:
+                    await asyncio.sleep(retry_after)
+                    status, retry_after_header, data = await send()
+                    retry_after = self._retry_after(retry_after_header)
+            if status >= 400:
+                return self._youcom_error(status, bool(api_key), retry_after)
+
+            items = []
+            for item in (data.get("results") or {}).get("web") or []:
+                snippet = item.get("description") or " ".join(item.get("snippets") or [])
+                items.append({"title": item.get("title"), "link": item.get("url"), "snippet": snippet})
+            return self.format_results(items[:top_k])
+        except Exception as e:
+            logger.error("[youcom_search] error: %s", e)
+            return f"Search failed: {e}."
+
+    # ------------------------------------------------------------------
     # Unified entry point
     # ------------------------------------------------------------------
 
@@ -186,5 +272,7 @@ class WebSearchToolkit:
                 return await self.serper_search(query, top_k)
             case "google":
                 return await self.google_search(query, top_k)
+            case "youcom":
+                return await self._youcom_search(query, top_k)
             case _:
                 raise ValueError(f"Invalid API provider: {self.api_provider}")

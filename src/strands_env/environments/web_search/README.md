@@ -1,6 +1,6 @@
 # Web Search Environment
 
-A web search environment that gives the agent search and optional web scraping tools. Supports Serper and Google Custom Search providers.
+A web search environment that gives the agent search and optional web scraping tools. Supports Serper, Google Custom Search and You.com providers.
 
 ## Setup
 
@@ -13,6 +13,9 @@ export SERPER_API_KEY="your-key"
 # Google Custom Search
 export GOOGLE_API_KEY="your-key"
 export GOOGLE_CSE_ID="your-cse-id"
+
+# You.com: works without a key (100 searches/day per IP); set a key for training volume
+export YDC_API_KEY="your-key"  # optional
 ```
 
 ## Usage
@@ -45,6 +48,7 @@ Depends on configuration:
 |---|---|
 | Default | `serper_search` |
 | `search_provider="google"` | `google_search` |
+| `search_provider="youcom"` | `youcom_search` |
 | `scrape_enabled=True` | search + `scrape` |
 | `scrape_enabled=True` + `summarizer_model_factory` | search + `scrape_and_summarize` |
 
@@ -52,7 +56,7 @@ Depends on configuration:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `search_provider` | `"serper"` | `"serper"` or `"google"` |
+| `search_provider` | `"serper"` | `"serper"`, `"google"` or `"youcom"` |
 | `search_timeout` | `10` | Seconds per search API call |
 | `blocked_domains` | — | Appended to queries as `-site:` exclusions |
 | `scrape_enabled` | `False` | Expose the scrape tool |
